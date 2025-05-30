@@ -20,7 +20,7 @@ public partial class MainWindow : Window
     private readonly PerformanceCounter _memoryCounter;
     private bool _countersInitialized = false;
     private const double LOW_USAGE_THRESHOLD = 70.0;
-    private const int MAX_INSTANCES = 4;
+    private const int MAX_INSTANCES = 10;
     private const double HIGH_USAGE_THRESHOLD = 85.0;
     private const int MIN_INSTANCES = 1;
 
