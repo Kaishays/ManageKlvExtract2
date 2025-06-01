@@ -14,20 +14,25 @@ namespace ManageKlvExtract;
 /// </summary>
 public partial class MainWindow : Window
 {
-    private const string KLV_EXTRACTOR_PATH = @"S:\Projects\AltiCam Vision\Software (MSP & GUI)\KLV_Metadata_Extraction\Release\KlvExtractor.exe";
+    private const string KLV_EXTRACTOR_PATH = @"S:\Projects\AltiCam Vision\Software (MSP & GUI)\KLV_Metadata_Extraction\Release2\KlvExtractor.exe";
     private readonly DispatcherTimer _monitoringTimer;
     private readonly PerformanceCounter _cpuCounter;
     private readonly PerformanceCounter _memoryCounter;
     private bool _countersInitialized = false;
-    private const double LOW_USAGE_THRESHOLD = 70.0;
-    private const int MAX_INSTANCES = 10;
+    private const double LOW_USAGE_THRESHOLD = 60.0;
     private const double HIGH_USAGE_THRESHOLD = 85.0;
     private const int MIN_INSTANCES = 1;
-
+    private const int LOW_MEMORY_MAX_INSTANCES = 5;
+    private const int HIGH_MEMORY_MAX_INSTANCES = 13;
+    private const int MEMORY_THRESHOLD_GB = 16;
+    private readonly int MAX_INSTANCES;
+    private bool CanStartMoreExtractions = true;
 
     public MainWindow()
     {
         InitializeComponent();
+        
+        MAX_INSTANCES = CalculateMaxInstancesBasedOnSystemMemory();
         
         _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
         _memoryCounter = new PerformanceCounter("Memory", "Available MBytes");
@@ -47,8 +52,26 @@ public partial class MainWindow : Window
         await InitializeApplication();
     }
 
+    private int CalculateMaxInstancesBasedOnSystemMemory()
+    {
+        var totalMemoryMB = GetTotalPhysicalMemory();
+        
+        if (totalMemoryMB == 0)
+        {
+            return LOW_MEMORY_MAX_INSTANCES;
+        }
+        
+        var totalMemoryGB = totalMemoryMB / 1024;
+        
+        return totalMemoryGB <= MEMORY_THRESHOLD_GB 
+            ? LOW_MEMORY_MAX_INSTANCES 
+            : HIGH_MEMORY_MAX_INSTANCES;
+    }
+
+
     private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        CanStartMoreExtractions = false;
         // Cancel the close event temporarily to allow async cleanup
         e.Cancel = true;
         
@@ -131,12 +154,15 @@ public partial class MainWindow : Window
     {
         try
         {
-            var startInfo = CreateProcessStartInfo();
-            var process = Process.Start(startInfo);
-            
-            if (process != null)
+            if (CanStartMoreExtractions)
             {
-                UpdateStatus($"Started extractor instance {instanceNumber} (PID: {process.Id})");
+                var startInfo = CreateProcessStartInfo();
+                var process = Process.Start(startInfo);
+
+                if (process != null)
+                {
+                    UpdateStatus($"Started extractor instance {instanceNumber} (PID: {process.Id})");
+                }
             }
         }
         catch (Exception ex)
@@ -269,17 +295,12 @@ public partial class MainWindow : Window
 
     private async Task TerminateSpecificProcess(Process process)
     {
-        try
+        UpdateStatus($"High resource usage detected - terminating process {process.Id}");
+        
+        if (await AttemptGracefulProcessTermination(process))
         {
-            UpdateStatus($"High resource usage detected - terminating process {process.Id}");
-            process.Kill();
-            await process.WaitForExitAsync();
             await RefreshProcessInformation();
             UpdateStatus($"Process {process.Id} terminated successfully");
-        }
-        catch (Exception ex)
-        {
-            UpdateStatus($"Failed to terminate process {process.Id}: {ex.Message}");
         }
     }
 
@@ -557,15 +578,9 @@ public partial class MainWindow : Window
         
         foreach (var process in processes)
         {
-            try
+            if (await AttemptGracefulProcessTermination(process))
             {
-                process.Kill();
-                await process.WaitForExitAsync();
                 terminatedCount++;
-            }
-            catch (Exception ex)
-            {
-                UpdateStatus($"Failed to terminate process {process.Id}: {ex.Message}");
             }
         }
         
@@ -589,19 +604,77 @@ public partial class MainWindow : Window
         
         foreach (var process in processes)
         {
-            try
+            if (await AttemptGracefulProcessTermination(process))
             {
-                process.Kill();
-                await process.WaitForExitAsync();
                 terminatedCount++;
-            }
-            catch (Exception ex)
-            {
-                UpdateStatus($"Failed to terminate process {process.Id}: {ex.Message}");
             }
         }
         
         UpdateStatus($"Application shutdown - terminated {terminatedCount} extractor processes");
+    }
+
+    private async Task<bool> AttemptGracefulProcessTermination(Process process)
+    {
+        try
+        {
+            if (process.HasExited)
+            {
+                return true;
+            }
+
+            UpdateStatus($"Attempting graceful shutdown of process {process.Id}");
+            
+            if (await AttemptGracefulShutdown(process))
+            {
+                UpdateStatus($"Process {process.Id} closed gracefully");
+                return true;
+            }
+            
+            UpdateStatus($"Graceful shutdown failed for process {process.Id}, forcing termination");
+            return await ForceProcessTermination(process);
+        }
+        catch (Exception ex)
+        {
+            UpdateStatus($"Failed to terminate process {process.Id}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<bool> AttemptGracefulShutdown(Process process)
+    {
+        try
+        {
+            if (!process.CloseMainWindow())
+            {
+                return false;
+            }
+            
+            const int gracefulShutdownTimeoutMs = 5000;
+            var timeoutTask = Task.Delay(gracefulShutdownTimeoutMs);
+            var exitTask = process.WaitForExitAsync();
+            
+            var completedTask = await Task.WhenAny(exitTask, timeoutTask);
+            
+            return completedTask == exitTask;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<bool> ForceProcessTermination(Process process)
+    {
+        try
+        {
+            process.Kill();
+            await process.WaitForExitAsync();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
